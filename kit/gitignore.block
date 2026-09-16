@@ -1,0 +1,9 @@
+# claude-workflow-kit:start
+# .claude/ игнорируется, кроме отслеживаемых частей кита
+.claude/*
+!.claude/agents/
+!.claude/skills/
+!.claude/hooks/
+!.claude/settings.json
+!.claude/kit.json
+# claude-workflow-kit:end

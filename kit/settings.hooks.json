@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/orchestrator-guard.js", "remind"],
+            "timeout": 10,
+            "statusMessage": "orchestrator-guard: напоминание"
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/task-context.js"],
+            "timeout": 10,
+            "statusMessage": "tasks: доска задач"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/orchestrator-guard.js", "stop"],
+            "timeout": 20,
+            "statusMessage": "orchestrator-guard: проверка хода"
+          }
+        ]
+      }
+    ]
+  }
+}
