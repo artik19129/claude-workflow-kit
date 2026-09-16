@@ -52,6 +52,7 @@ function parseArgs(argv) {
     command: null,
     project: null,
     node: null,
+    nodeFlag: false,
     dryRun: false,
     designSkill: true,
     designSkillSet: false,
@@ -71,8 +72,10 @@ function parseArgs(argv) {
       i++;
       if (i >= argv.length) fail('у --node нет значения');
       opts.node = argv[i];
+      opts.nodeFlag = true;
     } else if (arg.indexOf('--node=') === 0) {
       opts.node = arg.slice('--node='.length);
+      opts.nodeFlag = true;
     } else if (arg.indexOf('--') === 0) {
       fail('неизвестный флаг: ' + arg);
     } else {
@@ -398,8 +401,7 @@ function sameHook(a, b) {
   return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
-function probeNode(nodePath) {
-  const explicit = !!nodePath;
+function probeNode(nodePath, explicit) {
   const nodeCmd = nodePath || 'node';
   let result;
   try {
@@ -778,7 +780,7 @@ function preflight(project, opts, checkNode) {
     }
   }
 
-  if (checkNode) probeNode(opts.node);
+  if (checkNode) probeNode(opts.node, opts.nodeFlag);
 }
 
 function projectState(project) {
