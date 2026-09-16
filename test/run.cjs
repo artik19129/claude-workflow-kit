@@ -111,6 +111,10 @@ safe('T1', function () {
     ls.join(' | ')
   );
   check('T1 dist/ и чужой комментарий целы', count(ls, 'dist/') === 1 && count(ls, '# claude-workflow-kit: заметка') === 1, ls.join(' | '));
+  check('T1 ui-ux-pro-max SKILL.md установлен', fs.existsSync(path.join(d, '.claude', 'skills', 'ui-ux-pro-max', 'SKILL.md')));
+  check('T1 ui-ux-pro-max search.py установлен', fs.existsSync(path.join(d, '.claude', 'skills', 'ui-ux-pro-max', 'scripts', 'search.py')));
+  check('T1 ui-ux-pro-max styles.csv установлен', fs.existsSync(path.join(d, '.claude', 'skills', 'ui-ux-pro-max', 'data', 'styles.csv')));
+  check('T1 ui-ux-pro-max LICENSE установлен', fs.existsSync(path.join(d, '.claude', 'skills', 'ui-ux-pro-max', 'LICENSE')));
   const ci1 = git(d, ['check-ignore', '-v', '.claude/agents/impl-opus.md']);
   check('T1 агент не игнорируется', ci1.status === 1 && ci1.out.trim() === '', 'exit ' + ci1.status + ' out=' + ci1.out.trim());
   const ci2 = git(d, ['check-ignore', '-v', '.claude/settings.local.json']);
