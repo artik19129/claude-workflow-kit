@@ -263,6 +263,27 @@ function copyProjectFile(project, src, destRel, dryRun) {
   log('создан', target);
 }
 
+function projectOwnedFiles() {
+  const templates = path.join(KIT_DIR, 'templates');
+  return [
+    { src: path.join(templates, 'tasks', 'README.md'), dest: path.join('tasks', 'README.md') },
+    { src: path.join(templates, 'tasks', '_template.md'), dest: path.join('tasks', '_template.md') },
+    { src: path.join(templates, 'docs', 'decisions.md'), dest: path.join('docs', 'decisions.md') },
+    { src: path.join(templates, 'docs', 'specs', '_template.md'), dest: path.join('docs', 'specs', '_template.md') },
+  ];
+}
+
+function copyProjectFiles(project, dryRun) {
+  projectOwnedFiles().forEach((item) => copyProjectFile(project, item.src, item.dest, dryRun));
+}
+
+function warnTaskTemplate(project) {
+  const text = readText(path.join(project, 'tasks', '_template.md'));
+  if (text !== null && !/^spec\s*:/m.test(stripBom(text))) {
+    warn('в tasks/_template.md нет поля spec: — добавьте строку «spec:» во frontmatter (образец: kit/templates/tasks/_template.md)');
+  }
+}
+
 function sectionText() {
   const file = path.join(KIT_DIR, 'CLAUDE.section.md');
   const text = readText(file);
@@ -800,9 +821,8 @@ function commandInstall(project, opts) {
   applyGitignore(project, opts.dryRun);
   writeKitJson(project, opts, created);
 
-  copyProjectFile(project, path.join(KIT_DIR, 'templates', 'tasks', 'README.md'), path.join('tasks', 'README.md'), opts.dryRun);
-  copyProjectFile(project, path.join(KIT_DIR, 'templates', 'tasks', '_template.md'), path.join('tasks', '_template.md'), opts.dryRun);
-  copyProjectFile(project, path.join(KIT_DIR, 'templates', 'docs', 'decisions.md'), path.join('docs', 'decisions.md'), opts.dryRun);
+  copyProjectFiles(project, opts.dryRun);
+  warnTaskTemplate(project);
   generateBoard(project, opts.dryRun);
 }
 
@@ -816,8 +836,9 @@ function commandUpdate(project, opts) {
   mergeHooks(project, opts);
   applyGitignore(project, opts.dryRun);
   writeKitJson(project, opts, created);
+  copyProjectFiles(project, opts.dryRun);
+  warnTaskTemplate(project);
   generateBoard(project, opts.dryRun);
-  log('пропущен (project-owned)', 'tasks/*.md, docs/decisions.md');
 }
 
 function commandUninstall(project, opts) {
@@ -837,7 +858,7 @@ function commandUninstall(project, opts) {
   removeClaudeSection(project, opts.dryRun, installed.created_claude_md === true);
   removeGitignore(project, opts.dryRun);
   pruneEmptyDirs(project, opts.dryRun);
-  log('пропущен (project-owned)', 'tasks/, docs/decisions.md');
+  log('пропущен (project-owned)', 'tasks/, docs/decisions.md, docs/specs/');
 }
 
 function commandStatus(project, opts) {

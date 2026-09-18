@@ -46,6 +46,8 @@ function parseFrontmatter(text) {
     const quote = value.charAt(0);
     if (value.length >= 2 && (quote === '"' || quote === "'") && value.charAt(value.length - 1) === quote) {
       value = value.slice(1, -1);
+    } else if (quote === '#') {
+      value = '';
     } else {
       const commentAt = value.indexOf(' #');
       if (commentAt >= 0) value = value.slice(0, commentAt).trim();

@@ -8,12 +8,20 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const board = require('./board.js');
+const spec = require('./spec.js');
+
 const READ_LIMIT = 5;
 const READ_TOOLS = new Set(['Read', 'Grep', 'Glob']);
 const AGENT_TOOLS = new Set(['Agent', 'Task']);
 const SPAWN_REGEX = /заспавнил\s*:/i;
+const SPEC_GATED_AGENTS = /^(?:impl-|review-)/i;
+const TASK_ID_IN_TEXT_RE = /\bVC-\d+\b/gi;
+const SPEC_SIZES = new Set(['M', 'L']);
+const SPEC_SKIP_STATUSES = new Set(['done', 'backlog']);
+const HOOKS_DIR_RE = /[\\/]\.claude[\\/]hooks$/;
 
-const REMIND_TEXT = '[orchestrator-guard] Режим: техлид-оркестратор (правила: секция claude-workflow-kit в CLAUDE.md проекта). Поиск, код, тесты, ревью, критика постановки и дизайн — агентам: explore-opus, impl-sonnet, impl-opus, review-opus, product-critic, arch-critic, ui-designer; запуск только в фоне (run_in_background: true) с немедленным завершением хода. Себе: проектирование, бриф, 2–3 вызова codegraph, короткие git-проверки, приёмка. В финальном сообщении хода на каждого запущенного агента строка «Заспавнил: <тип> · <модель> · <effort> — <задача>». Файл задачи tasks/<ID>.md обновлять после каждого шага.';
+const REMIND_TEXT = '[orchestrator-guard] Режим: техлид-оркестратор (правила: секция claude-workflow-kit в CLAUDE.md проекта). Поиск, код, тесты, ревью, критика постановки и дизайн — агентам: explore-opus, impl-sonnet, impl-opus, review-opus, product-critic, arch-critic, ui-designer; запуск только в фоне (run_in_background: true) с немедленным завершением хода. Себе: проектирование, спека, бриф, 2–3 вызова codegraph, короткие git-проверки, приёмка. Для задач M/L перед брифами — спека docs/specs/<ID>-<slug>.md, утверждённая CEO (/spec <ID>, затем node .claude/hooks/spec.js approve <ID>); бриф исполнителя и ревьюера ссылается на неё путём — без утверждённой спеки Stop-хук блокирует ход. В финальном сообщении хода на каждого запущенного агента строка «Заспавнил: <тип> · <модель> · <effort> — <задача>». Файл задачи tasks/<ID>.md обновлять после каждого шага; решения без CEO — в «Решения» с пометкой «оркестратор».';
 
 const LOG_PATH = path.join(os.tmpdir(), 'orchestrator-guard.log');
 
@@ -112,14 +120,80 @@ function buildTurns(entries) {
   return turns;
 }
 
-function evaluateTurn(turnEntries) {
+function resolveRoot(input) {
+  if (process.env.CLAUDE_PROJECT_DIR) return path.resolve(process.env.CLAUDE_PROJECT_DIR);
+  if (input && typeof input.cwd === 'string' && input.cwd) return path.resolve(input.cwd);
+  if (HOOKS_DIR_RE.test(__dirname)) return path.resolve(__dirname, '..', '..');
+  return process.cwd();
+}
+
+// Гейт спеки: impl-* и review-* по задаче M/L получают в брифе путь к утверждённой спеке.
+// Возвращает null, если нарушений нет, иначе { subagent_type, candidates }.
+function specGate(root, subagentType, prompt) {
+  if (!root || !SPEC_GATED_AGENTS.test(subagentType || '')) return null;
+  const tasksDir = board.tasksDir(root);
+  if (!fs.existsSync(tasksDir)) return null;
+
+  const text = String(prompt || '');
+  const normalizedPrompt = text.replace(/\\/g, '/');
+  const seen = new Set();
+  const candidates = [];
+
+  for (const raw of text.match(TASK_ID_IN_TEXT_RE) || []) {
+    const id = raw.toUpperCase();
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    let taskText;
+    try {
+      taskText = fs.readFileSync(path.join(tasksDir, id + '.md'), 'utf8');
+    } catch (e) {
+      continue;
+    }
+    const parsed = board.parseFrontmatter(taskText);
+    if (parsed.error) continue;
+
+    const size = (parsed.data.size || '').trim().toUpperCase();
+    const status = (parsed.data.status || '').trim().toLowerCase();
+    if (!SPEC_SIZES.has(size) || SPEC_SKIP_STATUSES.has(status)) continue;
+
+    const specField = (parsed.data.spec || '').trim().replace(/\\/g, '/');
+    const info = specField ? spec.readSpec(root, specField) : null;
+    candidates.push({
+      id: id,
+      size: size,
+      status: status,
+      specField: specField,
+      specExists: !!(info && info.exists),
+      specStatus: info ? info.status : '',
+      inPrompt: !!specField && normalizedPrompt.indexOf(specField) >= 0,
+    });
+  }
+
+  if (candidates.length === 0) return null;
+  if (candidates.some((c) => c.specExists && c.specStatus === 'approved' && c.inPrompt)) return null;
+  return { subagent_type: subagentType, candidates: candidates };
+}
+
+function describeCandidate(c) {
+  let state;
+  if (!c.specField) state = 'в frontmatter нет поля spec';
+  else if (!c.specExists) state = 'спека ' + c.specField + ' не найдена';
+  else if (c.specStatus !== 'approved') state = 'спека ' + c.specField + ' в статусе «' + (c.specStatus || '?') + '», нужен approve';
+  else state = 'путь ' + c.specField + ' не указан в брифе';
+  return c.id + ' (' + c.size + ', ' + (c.status || '?') + '): ' + state;
+}
+
+function evaluateTurn(turnEntries, ctx) {
   const spawnGlobalRegex = new RegExp(SPAWN_REGEX.source, 'gi');
+  const root = ctx && ctx.root ? ctx.root : null;
 
   let textAll = '';
   let readCount = 0;
   let agentCount = 0;
   const agentCalls = [];
   const foregroundAgents = [];
+  const specGateViolations = [];
 
   for (const entry of turnEntries) {
     if (entry.isSidechain === true) continue;
@@ -148,6 +222,8 @@ function evaluateTurn(turnEntries) {
           if (input.run_in_background === false) {
             foregroundAgents.push(call);
           }
+          const gate = specGate(root, input.subagent_type, input.prompt);
+          if (gate) specGateViolations.push(gate);
         } else if (READ_TOOLS.has(name)) {
           readCount++;
         }
@@ -161,15 +237,24 @@ function evaluateTurn(turnEntries) {
   if (agentCount > 0 && spawnCount < agentCount) violations.push('A');
   if (agentCount === 0 && readCount > READ_LIMIT) violations.push('B');
   if (foregroundAgents.length > 0) violations.push('C');
+  if (specGateViolations.length > 0) violations.push('D');
 
-  return { violations, readCount, agentCount, spawnCount, agentCalls, foregroundAgents };
+  return {
+    violations,
+    readCount,
+    agentCount,
+    spawnCount,
+    agentCalls,
+    foregroundAgents,
+    specGate: specGateViolations,
+  };
 }
 
-function evaluateTranscript(text) {
+function evaluateTranscript(text, ctx) {
   const entries = parseTranscript(text);
   const turns = buildTurns(entries);
   const lastTurn = turns[turns.length - 1];
-  const result = evaluateTurn(lastTurn.entries);
+  const result = evaluateTurn(lastTurn.entries, ctx);
 
   return Object.assign(result, {
     entriesCount: entries.length,
@@ -205,6 +290,15 @@ function buildReason(evalResult) {
     );
   }
 
+  if (evalResult.violations.includes('D')) {
+    const list = evalResult.specGate
+      .map((g) => `${g.subagent_type}: ${g.candidates.map(describeCandidate).join('; ')}`)
+      .join(' | ');
+    reasons.push(
+      `[orchestrator-guard] Агент запущен по задаче M/L без утверждённой спеки в брифе — ${list}. Спека обязательна для M и L: /spec <ID> → апрув CEO → node .claude/hooks/spec.js approve <ID> → путь к спеке в бриф. Сейчас: если спека утверждена, а путь забыт — отправь его агенту через SendMessage (строка «Продолжаю: …»); если спеки нет или она draft — останови агента (TaskStop) и в финальном сообщении скажи CEO, чего не хватает.`
+    );
+  }
+
   return reasons.join('\n\n');
 }
 
@@ -229,11 +323,14 @@ function runStop(input) {
       return { block: false, reason: '' };
     }
 
-    const evalResult = evaluateTranscript(text);
+    const root = resolveRoot(input);
+    const evalResult = evaluateTranscript(text, { root: root });
     debugLog('runStop: evaluated', {
+      root: root,
       readCount: evalResult.readCount,
       agentCount: evalResult.agentCount,
       spawnCount: evalResult.spawnCount,
+      specGate: evalResult.specGate,
       violations: evalResult.violations,
       turnsCount: evalResult.turnsCount,
       lastTurnEntriesCount: evalResult.lastTurnEntriesCount,
@@ -297,9 +394,10 @@ function modeReport(transcriptPath) {
 
   const entries = parseTranscript(text);
   const turns = buildTurns(entries);
+  const ctx = { root: resolveRoot(null) };
 
   turns.forEach((turn, idx) => {
-    const evalResult = evaluateTurn(turn.entries);
+    const evalResult = evaluateTurn(turn.entries, ctx);
     const violationsStr = evalResult.violations.length > 0 ? evalResult.violations.join(',') : '-';
     let line = `#${idx + 1} | "${turn.userText}" | reads=${evalResult.readCount} agents=${evalResult.agentCount} spawn=${evalResult.spawnCount} violations=${violationsStr}`;
     if (evalResult.violations.includes('A')) {
@@ -309,6 +407,10 @@ function modeReport(transcriptPath) {
     if (evalResult.violations.includes('C')) {
       const types = evalResult.foregroundAgents.map((v) => v.subagent_type || '?').join(',');
       line += ` | C:[${types}]`;
+    }
+    if (evalResult.violations.includes('D')) {
+      const ids = evalResult.specGate.map((g) => g.candidates.map((c) => c.id).join(',')).join(';');
+      line += ` | D:[${ids}]`;
     }
     process.stdout.write(line + '\n');
   });
@@ -364,6 +466,35 @@ function writeTempTranscript(name, entries) {
   fs.writeFileSync(filePath, toJsonl(entries), 'utf8');
   TEMP_FILES.push(filePath);
   return filePath;
+}
+
+const TEMP_DIRS = [];
+
+function makeTempProject(name, files) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `orchestrator-guard-selftest-${name}-`));
+  TEMP_DIRS.push(dir);
+  for (const rel of Object.keys(files)) {
+    const file = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, files[rel], 'utf8');
+  }
+  return dir;
+}
+
+function taskFileText(id, size, status, specPath) {
+  return (
+    `---\nid: ${id}\ntitle: Задача ${id}\nsize: ${size}\nstatus: ${status}\n` +
+    (specPath ? `spec: ${specPath}\n` : '') +
+    `---\n# ${id}\n`
+  );
+}
+
+function specFileText(id, status) {
+  return `---\nid: ${id}\ntitle: Задача ${id}\nstatus: ${status}\n---\n# ${id} — спека\n\n## Цель\nЦель.\n`;
+}
+
+function stopWithProject(name, root, entries) {
+  return runStop({ transcript_path: writeTempTranscript(name, entries), stop_hook_active: false, cwd: root });
 }
 
 function modeSelftest() {
@@ -562,6 +693,150 @@ function modeSelftest() {
     },
   });
 
+  const specProject = () =>
+    makeTempProject('spec', {
+      'tasks/VC-001.md': taskFileText('VC-001', 'M', 'in_progress'),
+      'tasks/VC-002.md': taskFileText('VC-002', 'M', 'approved', 'docs/specs/VC-002-approved.md'),
+      'docs/specs/VC-002-approved.md': specFileText('VC-002', 'approved'),
+      'tasks/VC-003.md': taskFileText('VC-003', 'L', 'approved', 'docs/specs/VC-003-draft.md'),
+      'docs/specs/VC-003-draft.md': specFileText('VC-003', 'draft'),
+      'tasks/VC-004.md': taskFileText('VC-004', 'S', 'in_progress'),
+      'tasks/VC-005.md': taskFileText('VC-005', 'M', 'done'),
+      'tasks/VC-006.md': taskFileText('VC-006', 'M', 'approved', 'docs/specs/VC-006-missing.md'),
+    });
+
+  cases.push({
+    name: 'caseD1_impl_on_M_task_without_spec_field',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('сделай VC-001'),
+        assistantTextEntry('Заспавнил: impl-opus · opus · high — VC-001'),
+        assistantToolUseEntry('Agent', { subagent_type: 'impl-opus', description: 'VC-001', prompt: 'Задача VC-001: реализовать экспорт', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD1', root, entries);
+      assert(r.block === true, 'expected block D, M task without spec');
+      assert(r.reason.includes('VC-001') && r.reason.includes('нет поля spec'), 'reason should name the task and the missing spec field');
+    },
+  });
+
+  cases.push({
+    name: 'caseD2_impl_with_approved_spec_path_in_prompt',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('сделай VC-002'),
+        assistantTextEntry('Заспавнил: impl-sonnet · sonnet · medium — VC-002'),
+        assistantToolUseEntry('Agent', { subagent_type: 'impl-sonnet', description: 'VC-002', prompt: 'Задача VC-002. Спека: docs/specs/VC-002-approved.md, зона «сервер».', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD2', root, entries);
+      assert(r.block === false, 'expected no block, approved spec path is in the prompt');
+    },
+  });
+
+  cases.push({
+    name: 'caseD3_review_with_draft_spec',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('ревью VC-003'),
+        assistantTextEntry('Заспавнил: review-opus · opus · high — VC-003'),
+        assistantToolUseEntry('Agent', { subagent_type: 'review-opus', description: 'VC-003', prompt: 'Ревью VC-003 по спеке docs/specs/VC-003-draft.md', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD3', root, entries);
+      assert(r.block === true, 'expected block D, spec is draft');
+      assert(r.reason.includes('draft'), 'reason should mention the draft status');
+    },
+  });
+
+  cases.push({
+    name: 'caseD4_approved_spec_but_path_missing_from_prompt',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('сделай VC-002'),
+        assistantTextEntry('Заспавнил: impl-opus · opus · high — VC-002'),
+        assistantToolUseEntry('Agent', { subagent_type: 'impl-opus', description: 'VC-002', prompt: 'Задача VC-002: сделай по спеке', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD4', root, entries);
+      assert(r.block === true, 'expected block D, spec path not in prompt');
+      assert(r.reason.includes('не указан в брифе'), 'reason should say the path is missing from the brief');
+    },
+  });
+
+  cases.push({
+    name: 'caseD5_S_task_and_done_task_not_gated',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('сделай VC-004'),
+        assistantTextEntry('Заспавнил: impl-sonnet · sonnet · medium — VC-004'),
+        assistantToolUseEntry('Agent', { subagent_type: 'impl-sonnet', description: 'VC-004', prompt: 'Задача VC-004 (S), образец — VC-005', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD5', root, entries);
+      assert(r.block === false, 'expected no block, S task and done task are not gated');
+    },
+  });
+
+  cases.push({
+    name: 'caseD6_explore_not_gated',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('разведка VC-001'),
+        assistantTextEntry('Заспавнил: explore-opus · opus · medium — VC-001'),
+        assistantToolUseEntry('Agent', { subagent_type: 'explore-opus', description: 'VC-001', prompt: 'Разведка по VC-001', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD6', root, entries);
+      assert(r.block === false, 'expected no block, explore agents are not gated');
+    },
+  });
+
+  cases.push({
+    name: 'caseD7_reference_to_other_active_task_ok_when_own_spec_present',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('сделай VC-002'),
+        assistantTextEntry('Заспавнил: impl-opus · opus · high — VC-002'),
+        assistantToolUseEntry('Agent', { subagent_type: 'impl-opus', description: 'VC-002', prompt: 'Задача VC-002, спека docs/specs/VC-002-approved.md. Не трогать зону VC-001.', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD7', root, entries);
+      assert(r.block === false, 'expected no block, own approved spec is referenced');
+    },
+  });
+
+  cases.push({
+    name: 'caseD8_spec_file_missing',
+    run: () => {
+      const root = specProject();
+      const entries = [
+        userTextEntry('сделай VC-006'),
+        assistantTextEntry('Заспавнил: impl-opus · opus · high — VC-006'),
+        assistantToolUseEntry('Agent', { subagent_type: 'impl-opus', description: 'VC-006', prompt: 'Задача VC-006, спека docs/specs/VC-006-missing.md', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD8', root, entries);
+      assert(r.block === true, 'expected block D, spec file missing');
+      assert(r.reason.includes('не найдена'), 'reason should say the spec file is missing');
+    },
+  });
+
+  cases.push({
+    name: 'caseD9_no_tasks_dir_no_gate',
+    run: () => {
+      const root = makeTempProject('notasks', { 'README.md': '# пусто\n' });
+      const entries = [
+        userTextEntry('сделай VC-001'),
+        assistantTextEntry('Заспавнил: impl-opus · opus · high — VC-001'),
+        assistantToolUseEntry('Agent', { subagent_type: 'impl-opus', description: 'VC-001', prompt: 'Задача VC-001', run_in_background: true }),
+      ];
+      const r = stopWithProject('caseD9', root, entries);
+      assert(r.block === false, 'expected no block, project has no tasks/');
+    },
+  });
+
+  const savedProjectDir = process.env.CLAUDE_PROJECT_DIR;
+  delete process.env.CLAUDE_PROJECT_DIR;
   let failed = 0;
   try {
     for (const c of cases) {
@@ -574,9 +849,15 @@ function modeSelftest() {
       }
     }
   } finally {
+    if (savedProjectDir !== undefined) process.env.CLAUDE_PROJECT_DIR = savedProjectDir;
     for (const filePath of TEMP_FILES) {
       try {
         fs.unlinkSync(filePath);
+      } catch (e) {}
+    }
+    for (const dir of TEMP_DIRS) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
       } catch (e) {}
     }
   }
@@ -597,4 +878,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { evaluateTranscript, evaluateTurn, buildTurns, runStop };
+module.exports = { evaluateTranscript, evaluateTurn, buildTurns, runStop, specGate, resolveRoot };
