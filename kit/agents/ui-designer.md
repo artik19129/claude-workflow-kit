@@ -2,7 +2,7 @@
 name: ui-designer
 description: Дизайнер интерфейса: короткая UI-спека до реализации — экраны, состояния, раскладка, компоненты, токены, тексты. Только чтение; запускать только для задач с UI, после product-critic.
 tools: Read, Grep, Glob, Bash, PowerShell, Skill, ToolSearch, mcp__codegraph__*
-model: opus
+model: claude-opus-5-5
 effort: medium
 maxTurns: 40
 color: purple

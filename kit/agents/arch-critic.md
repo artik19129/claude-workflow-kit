@@ -2,7 +2,7 @@
 name: arch-critic
 description: Архитектурный критик: что ломается, контракты, схема данных, миграции, ограничения, альтернативы, план по зонам с интерфейсами, оценка. Только чтение; запускать для M и L параллельно с product-critic, до спеки.
 tools: Read, Grep, Glob, Bash, PowerShell, ToolSearch, mcp__codegraph__*
-model: opus
+model: claude-opus-5-5
 effort: high
 maxTurns: 60
 color: magenta

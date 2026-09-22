@@ -2,7 +2,7 @@
 name: impl-opus
 description: Исполнитель реализации фич и нетривиальных рефакторингов по брифу со ссылкой на спеку и зону. Новые модули, доменные правила, миграции потребителей, тесты и селфтесты. Тест до кода (RED → GREEN), проверяет сборки, tsc, селфтесты и отчитывается диффом со статусом. Не коммитит.
 tools: Read, Edit, Write, Grep, Glob, Bash, PowerShell, ToolSearch, mcp__codegraph__*
-model: opus
+model: claude-opus-5-5
 effort: high
 maxTurns: 150
 color: yellow

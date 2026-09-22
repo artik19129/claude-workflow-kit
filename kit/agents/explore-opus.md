@@ -2,7 +2,7 @@
 name: explore-opus
 description: Разведка по коду только чтением. Карта модулей, трассировка потока, «где живёт X», факты с путями и строками для брифа; для багов — корневая причина со свидетельством. Не правит файлы. Использовать для любого поиска дольше 2–3 вызовов codegraph, в том числе для «быстрых вопросов» про поведение кода.
 tools: Read, Grep, Glob, Bash, PowerShell, ToolSearch, mcp__codegraph__*
-model: opus
+model: claude-opus-5-5
 effort: medium
 maxTurns: 60
 color: cyan

@@ -2,7 +2,7 @@
 name: product-critic
 description: Продуктовый критик постановки: трактовки, допущения, альтернативы, что вне задачи, критерии приёмки, вопросы CEO. Только чтение; запускать для задач размера M и L до спеки.
 tools: Read, Grep, Glob, Bash, PowerShell, ToolSearch, mcp__codegraph__*
-model: opus
+model: claude-opus-5-5
 effort: medium
 maxTurns: 40
 color: blue
