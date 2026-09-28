@@ -56,9 +56,9 @@ function json(dir, rel) {
 // nvm4w иногда подсовывает node его собственный exe как скрипт: в stderr «node.exe:1 … SyntaxError». Это не результат теста — повторяем запуск.
 const NODE_SHIM_GLITCH_RE = /node\.exe:1\r?\n[\s\S]*SyntaxError: Invalid or unexpected token/;
 
-function spawnNode(args) {
+function spawnNode(args, cwd) {
   for (let attempt = 0; attempt < 5; attempt++) {
-    const r = cp.spawnSync(process.execPath, args, { encoding: 'utf8', cwd: KIT });
+    const r = cp.spawnSync(process.execPath, args, { encoding: 'utf8', cwd: cwd || KIT });
     if (!r.error && r.status !== null && !NODE_SHIM_GLITCH_RE.test(r.stderr || '')) {
       return { status: r.status, out: r.stdout || '', err: r.stderr || '' };
     }
@@ -489,6 +489,172 @@ safe('T15', function () {
   check('T15 spec: с комментарием — пустое значение', parsed.data && parsed.data.spec === '', JSON.stringify(parsed));
   check('T15 size с комментарием — значение без комментария', parsed.data && parsed.data.size === 'M', JSON.stringify(parsed));
   check('T15 title в кавычках с # цел', parsed.data && parsed.data.title === 'Bug #42', JSON.stringify(parsed));
+});
+
+safe('T16 Codex lifecycle', function () {
+  const d = mk('codex lifecycle with spaces');
+  const args = ['--target', 'codex', '--no-design-skill'];
+  write(d, 'AGENTS.md', '\uFEFF# Правила проекта\r\nСохрани меня.\r\n');
+  write(d, '.codex/config.toml', 'model = "project-model"\n');
+  write(d, '.agents/skills/custom/SKILL.md', 'custom');
+  const original = read(d, 'AGENTS.md');
+  check('T16 dry-run exit 0', run(['install', d, ...args, '--dry-run']).status === 0);
+  check('T16 dry-run ничего не пишет', read(d, 'AGENTS.md') === original && read(d, '.codex/workflow-kit.json') === null);
+  const install = run(['install', d, ...args]);
+  check('T16 install', install.status === 0, install.err);
+  check('T16 только Codex', read(d, 'CLAUDE.md') === null && !fs.existsSync(path.join(d, '.claude')));
+  check('T16 пользовательские инструкции сохранены', read(d, 'AGENTS.md').startsWith(original));
+  check('T16 config сохранён', read(d, '.codex/config.toml') === 'model = "project-model"\n');
+  check('T16 skill Codex без инструментов Claude', !/\.claude|run_in_background|SendMessage|claude-opus|claude-sonnet/.test(read(d, '.agents/skills/task/SKILL.md')));
+  check('T16 путь поиска UI адаптирован', read(d, '.agents/skills/ui-ux-pro-max/SKILL.md').includes('.agents/skills/ui-ux-pro-max/scripts/search.py'));
+  check('T16 Python cache не установлен', !listAll(d).some(f => f.includes('__pycache__')));
+  check('T16 все навыки имеют frontmatter без BOM', listAll(d).filter(f => f.endsWith('/SKILL.md')).filter(f => !f.includes('/custom/')).every(f => /^---\r?\nname:/.test(read(d, f))));
+  check('T16 status', run(['status', d, '--target=codex']).status === 0);
+  const snapshot = listAll(d).filter(f => fs.statSync(path.join(d, f)).isFile()).map(f => [f, fs.readFileSync(path.join(d, f))]);
+  check('T16 повторный install', run(['install', d, ...args]).status === 0);
+  check('T16 повторная установка идемпотентна', snapshot.every(([f, content]) => fs.readFileSync(path.join(d, f)).equals(content)));
+  write(d, '.agents/skills/task/SKILL.md', 'changed');
+  check('T16 status видит изменение', run(['status', d, '--target', 'codex']).status === 1);
+  write(d, 'tasks/VC-001.md', '---\nid: VC-001\ntitle: Экспорт CSV\nsize: M\nstatus: discuss\nspec:\n---\n');
+  fs.mkdirSync(path.join(d, 'src'));
+  const script = name => path.join(d, '.codex/workflow', name + '.js');
+  check('T16 board из подкаталога', spawnNode([script('board')], path.join(d, 'src')).status === 0 && read(d, 'tasks/_index.md').includes('VC-001'));
+  check('T16 board указывает Codex', read(d, 'tasks/_index.md').includes('.codex/workflow/board.js'));
+  check('T16 spec new из подкаталога', spawnNode([script('spec'), 'new', 'VC-001', 'export-csv'], path.join(d, 'src')).status === 0);
+  check('T16 spec отклоняет пустой шаблон', spawnNode([script('spec'), 'approve', 'VC-001']).status === 1);
+  write(d, 'docs/specs/VC-001-export-csv.md', FILLED_SPEC);
+  check('T16 spec check', spawnNode([script('spec'), 'check', 'VC-001']).status === 0);
+  check('T16 spec approve', spawnNode([script('spec'), 'approve', 'VC-001', '--by', 'test']).status === 0);
+  const specBefore = read(d, 'docs/specs/VC-001-export-csv.md');
+  check('T16 update', run(['update', d, '--target', 'codex']).status === 0);
+  check('T16 update восстановил skill', run(['status', d, '--target', 'codex']).status === 0);
+  check('T16 update сохранил спеку', read(d, 'docs/specs/VC-001-export-csv.md') === specBefore);
+  check('T16 uninstall dry-run', run(['uninstall', d, '--target', 'codex', '--dry-run']).status === 0 && read(d, '.agents/skills/task/SKILL.md') !== null);
+  check('T16 uninstall', run(['uninstall', d, '--target', 'codex']).status === 0);
+  check('T16 AGENTS восстановлен', read(d, 'AGENTS.md') === original);
+  check('T16 пользовательские файлы и задачи сохранены', read(d, '.agents/skills/custom/SKILL.md') === 'custom' && read(d, '.codex/config.toml') !== null && read(d, 'docs/specs/VC-001-export-csv.md') === specBefore);
+  check('T16 файлы кита удалены', read(d, '.agents/skills/task/SKILL.md') === null && read(d, '.codex/workflow-kit.json') === null);
+  check('T16 повторный uninstall', run(['uninstall', d, '--target', 'codex']).status === 0);
+});
+
+safe('T17 coexistence', function () {
+  const d = mk('both');
+  check('T17 both install', run(['install', d, '--target', 'both', '--no-design-skill']).status === 0);
+  check('T17 оба клиента установлены', read(d, 'CLAUDE.md') !== null && read(d, 'AGENTS.md') !== null);
+  check('T17 both status', run(['status', d, '--target', 'both']).status === 0);
+  check('T17 both update', run(['update', d, '--target', 'both']).status === 0);
+  check('T17 удалить Claude', run(['uninstall', d]).status === 0);
+  check('T17 Codex остаётся рабочим', run(['status', d, '--target', 'codex']).status === 0);
+  check('T17 добавить Claude обратно', run(['install', d, '--no-design-skill']).status === 0);
+  check('T17 удалить Codex', run(['uninstall', d, '--target', 'codex']).status === 0);
+  check('T17 Claude остаётся рабочим', run(['status', d]).status === 0);
+  check('T17 добавить Codex к Claude', run(['install', d, '--target', 'codex', '--no-design-skill']).status === 0);
+  check('T17 удалить оба', run(['uninstall', d, '--target', 'both']).status === 0);
+  check('T17 общие шаблоны сохранены', read(d, 'tasks/_template.md') !== null && read(d, 'docs/specs/_template.md') !== null);
+  check('T17 созданный AGENTS удалён', read(d, 'AGENTS.md') === null);
+});
+
+safe('T18 validation', function () {
+  const d = mk('codex-conflict');
+  write(d, '.agents/skills/task/SKILL.md', 'user skill');
+  check('T18 конфликт до записи обоих клиентов', run(['install', d, '--target', 'both']).status === 1 && read(d, 'CLAUDE.md') === null && read(d, 'AGENTS.md') === null);
+  check('T18 чужой skill цел', read(d, '.agents/skills/task/SKILL.md') === 'user skill');
+  const broken = mk('codex-broken');
+  write(broken, 'AGENTS.md', '<!-- ai-workflow-kit:codex:start -->\n');
+  check('T18 сломанные маркеры до записи', run(['install', broken, '--target', 'both']).status === 1 && read(broken, 'CLAUDE.md') === null);
+  check('T18 неверный target', run(['install', broken, '--target', 'unknown']).status === 1);
+  check('T18 пустой target', run(['install', broken, '--target']).status === 1);
+  const invalid = mk('codex-manifest');
+  write(invalid, '.codex/workflow-kit.json', JSON.stringify({ files: ['../outside'] }));
+  check('T18 небезопасный manifest отклонён', run(['uninstall', invalid, '--target', 'codex']).status === 1);
+});
+
+safe('T19 Codex hooks lifecycle', function () {
+  const d = mk('codex hooks with spaces');
+  const foreign = { type: 'command', command: 'echo foreign', timeout: 3 };
+  write(d, '.codex/hooks.json', '\uFEFF' + JSON.stringify({ description: 'user metadata', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [foreign] }], SessionEnd: [{ hooks: [foreign] }] } }));
+  check('T19 install hooks', run(['install', d, '--target', 'codex', '--no-design-skill']).status === 0);
+  const initial = json(d, '.codex/hooks.json');
+  check('T19 foreign hooks preserved', initial.description === 'user metadata' && initial.hooks.PreToolUse[0].hooks[0].command === foreign.command && initial.hooks.SessionEnd.length === 1);
+  check('T19 four hook events', ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop'].every(e => initial.hooks[e].length > 0));
+  check('T19 update hooks', run(['update', d, '--target', 'codex']).status === 0);
+  check('T19 hooks idempotent', JSON.stringify(json(d, '.codex/hooks.json')) === JSON.stringify(initial));
+  const altered = json(d, '.codex/hooks.json');
+  altered.hooks.Stop = [];
+  write(d, '.codex/hooks.json', JSON.stringify(altered));
+  check('T19 missing hook detected', run(['status', d, '--target', 'codex']).status === 1);
+  check('T19 missing hook restored', run(['update', d, '--target', 'codex']).status === 0 && run(['status', d, '--target', 'codex']).status === 0);
+  const hooksModule = require(path.join(KIT, 'lib', 'codex-hooks.js'));
+  fs.mkdirSync(path.join(d, 'nested'));
+  const invoked = cp.spawnSync(hooksModule.COMMAND, { shell: true, cwd: path.join(d, 'nested'), input: JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'test', cwd: path.join(d, 'nested') }), encoding: 'utf8' });
+  check('T19 portable command from nested cwd', invoked.status === 0 && JSON.parse(invoked.stdout).hookSpecificOutput.hookEventName === 'SessionStart', invoked.stderr);
+  check('T19 uninstall hooks', run(['uninstall', d, '--target', 'codex']).status === 0);
+  const after = json(d, '.codex/hooks.json');
+  check('T19 only foreign config remains', after.description === 'user metadata' && after.hooks.PreToolUse.length === 1 && after.hooks.SessionEnd.length === 1 && !after.hooks.Stop);
+  const broken = mk('codex hooks invalid');
+  write(broken, '.codex/hooks.json', '{"SessionStart":[]}');
+  check('T19 malformed hooks fail before both install', run(['install', broken, '--target', 'both']).status === 1 && read(broken, 'CLAUDE.md') === null && read(broken, 'AGENTS.md') === null);
+});
+
+safe('T20 Codex gate', function () {
+  const d = mk('codex-gate');
+  run(['install', d, '--target', 'codex', '--no-design-skill']);
+  const guard = require(path.join(d, '.codex/workflow/guard.js'));
+  const base = { cwd: d, session_id: path.basename(d) + '-' + Date.now(), hook_event_name: 'PreToolUse' };
+  const invoke = (tool, command) => guard.handle(d, { ...base, tool_name: tool, tool_input: { command } });
+  const blocked = result => result.hookSpecificOutput && result.hookSpecificOutput.permissionDecision === 'deny';
+  const patch = file => '*** Begin Patch\n*** Add File: ' + file + '\n+test\n*** End Patch';
+  check('T20 no tasks no restriction', !blocked(invoke('apply_patch', patch('src/x.js'))));
+  write(d, 'tasks/VC-001.md', '---\nid: VC-001\nsize: M\nstatus: discuss\nspec: docs/specs/VC-001-export-csv.md\n---\n');
+  write(d, 'docs/specs/VC-001-export-csv.md', FILLED_SPEC);
+  check('T20 draft denies patch', blocked(invoke('apply_patch', patch('src/x.js'))));
+  check('T20 draft allows planning patch', !blocked(invoke('apply_patch', patch('docs/specs/VC-001-export-csv.md'))));
+  check('T20 mixed patch denied', blocked(invoke('apply_patch', patch('tasks/VC-001.md') + '\n*** Add File: src/x.js\n+x')));
+  check('T20 renamed destination denied', blocked(invoke('apply_patch', '*** Update File: tasks/VC-001.md\n*** Move to: src/x.js\n@@\n-x\n+y')));
+  check('T20 traversal denied', blocked(invoke('apply_patch', patch('tasks/../../outside.md'))));
+  check('T20 shell write denied', blocked(invoke('Bash', 'Set-Content src/x.js test')));
+  check('T20 shell interpreter denied', blocked(invoke('Bash', 'node -e "require(\'fs\').writeFileSync(\'x.js\',\'x\')"')));
+  check('T20 chained commands denied', blocked(invoke('Bash', 'Get-Content tasks/VC-001.md; Set-Content x.js test')));
+  check('T20 plain read allowed', !blocked(invoke('Bash', 'Get-Content tasks/VC-001.md')));
+  check('T20 spec helper allowed', !blocked(invoke('Bash', 'node .codex/workflow/spec.js check VC-001')));
+  check('T20 spawn denied', blocked(invoke('spawn_agent', 'implement VC-001')));
+  for (const role of ['explore-opus', 'product-critic', 'arch-critic', 'ui-designer', 'impl-sonnet', 'impl-opus', 'review-opus']) {
+    const result = guard.handle(d, { ...base, tool_name: 'spawn_agent', tool_input: { agent_type: role } });
+    check('T20 draft role ' + role, Boolean(blocked(result)) === (role.startsWith('impl-') || role === 'review-opus'));
+  }
+  write(d, 'docs/specs/VC-001-export-csv.md', FILLED_SPEC.replace('status: draft', 'status: approved').replace(/^approved:.*$/m, 'approved: 2026-09-28 tester'));
+  check('T20 approved patch allowed', !blocked(invoke('apply_patch', patch('src/x.js'))));
+  write(d, 'docs/specs/VC-001-export-csv.md', read(d, 'docs/specs/VC-001-export-csv.md').replace('Node 18+, лимит 10 000 строк', 'TODO'));
+  check('T20 invalid approved spec denied', blocked(invoke('apply_patch', patch('src/x.js'))));
+  write(d, 'tasks/VC-001.md', '---\nid: VC-001\nsize: S\nstatus: done\n---\n## Критерии приёмки\n- [ ] результат\n');
+  check('T20 Stop detects missing acceptance', guard.handle(d, { ...base, hook_event_name: 'Stop' }).decision === 'block');
+  check('T20 Stop no infinite loop', !guard.handle(d, { ...base, hook_event_name: 'Stop', stop_hook_active: true }).decision);
+  write(d, 'tasks/VC-001.md', '---\nid: VC-001\nsize: S\nstatus: done\n---\n## Критерии приёмки\n- [x] результат\n## Приёмка (свидетельства)\nnode --test: код 0, 3 PASS\n');
+  check('T20 complete acceptance allowed', !guard.handle(d, { ...base, hook_event_name: 'Stop' }).decision);
+  write(d, 'tasks/VC-002.md', '---\nid: VC-002\nsize: M\nstatus: discuss\nspec:\n---\n');
+  guard.handle(d, { ...base, hook_event_name: 'UserPromptSubmit', prompt: '$task VC-002' });
+  check('T20 explicit task selects pending gate', blocked(invoke('apply_patch', patch('src/x.js'))));
+  guard.handle(d, { ...base, hook_event_name: 'UserPromptSubmit', prompt: '$task VC-001' });
+  check('T20 unrelated draft does not block selected S task', !blocked(invoke('apply_patch', patch('src/x.js'))));
+});
+
+safe('T21 Codex agent profiles', function () {
+  const d = mk('codex-roles');
+  check('T21 install', run(['install', d, '--target', 'codex', '--no-design-skill']).status === 0);
+  const roles = fs.readdirSync(path.join(KIT, 'kit/agents')).map(f => f.replace('.md', ''));
+  for (const role of roles) {
+    const text = read(d, '.codex/agents/' + role + '.toml');
+    check('T21 model and effort ' + role, text.includes('model = "gpt-6-sol"') && text.includes('model_reasoning_effort = "' + (role === 'explore-opus' ? 'medium' : 'high') + '"') && text.includes('name = "' + role + '"') && text.includes('developer_instructions = '));
+  }
+  write(d, '.codex/agents/custom.toml', 'user profile');
+  write(d, '.codex/agents/explore-opus.toml', 'drift');
+  check('T21 detects profile drift', run(['status', d, '--target', 'codex']).status === 1);
+  check('T21 repairs profile drift', run(['update', d, '--target', 'codex']).status === 0 && run(['status', d, '--target', 'codex']).status === 0);
+  check('T21 uninstall', run(['uninstall', d, '--target', 'codex']).status === 0);
+  check('T21 owned removed custom preserved', roles.every(role => read(d, '.codex/agents/' + role + '.toml') === null) && read(d, '.codex/agents/custom.toml') === 'user profile');
+  const conflict = mk('codex-role-conflict');
+  write(conflict, '.codex/agents/impl-opus.toml', 'user profile');
+  check('T21 conflict before either target changes', run(['install', conflict, '--target', 'both']).status === 1 && read(conflict, 'CLAUDE.md') === null && read(conflict, '.codex/agents/impl-opus.toml') === 'user profile');
 });
 
 let failed = 0;

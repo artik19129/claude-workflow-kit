@@ -50,6 +50,7 @@ const MARK_START = '<!-- claude-workflow-kit:start v' + VERSION + ' -->';
 function parseArgs(argv) {
   const opts = {
     command: null,
+    target: 'claude',
     project: null,
     node: null,
     nodeFlag: false,
@@ -60,7 +61,10 @@ function parseArgs(argv) {
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--dry-run') {
+    if (arg === '--target' || arg.indexOf('--target=') === 0) {
+      opts.target = arg === '--target' ? argv[++i] : arg.slice(9);
+      if (!['claude', 'codex', 'both'].includes(opts.target)) fail('--target: ожидается claude, codex или both');
+    } else if (arg === '--dry-run') {
       opts.dryRun = true;
     } else if (arg === '--no-design-skill') {
       opts.designSkill = false;
@@ -90,7 +94,7 @@ function parseArgs(argv) {
 function usage() {
   return (
     'Использование: node install.js <install|update|status|uninstall> <путь-к-проекту>' +
-    ' [--node <путь к node>] [--design-skill|--no-design-skill] [--dry-run]'
+    ' [--target claude|codex|both] [--node <путь к node>] [--design-skill|--no-design-skill] [--dry-run]'
   );
 }
 
@@ -1002,12 +1006,25 @@ function main() {
   if (!isDir(KIT_DIR)) fail('каталог кита не найден: ' + KIT_DIR);
 
   try {
+    if (opts.target !== 'claude') {
+      const codex = require('./lib/codex.js');
+      codex.preflight(project, opts);
+      if (opts.target === 'both' && opts.command !== 'status') preflight(project, opts, opts.command !== 'uninstall');
+      if (opts.target === 'codex') {
+        process.exit(codex.run(project, opts, VERSION));
+      }
+      if (opts.command === 'status') {
+        const codexStatus = codex.run(project, opts, VERSION);
+        process.exit(Math.max(codexStatus, commandStatus(project, opts)));
+      }
+    }
     if (opts.command === 'status') {
       process.exit(commandStatus(project, opts));
     }
     if (opts.command === 'install') commandInstall(project, opts);
     if (opts.command === 'update') commandUpdate(project, opts);
     if (opts.command === 'uninstall') commandUninstall(project, opts);
+    if (opts.target === 'both') require('./lib/codex.js').run(project, opts, VERSION);
   } catch (e) {
     process.stderr.write('install.js: ' + (e && e.stack ? e.stack : e) + '\n');
     process.exit(1);

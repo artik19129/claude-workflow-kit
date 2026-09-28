@@ -21,7 +21,7 @@ const RESOLVED_RE = /решено/i;
 const CHECKBOX_RE = /^-\s+\[[ xX]\]\s+\S/;
 const BULLET_RE = /^[-*]\s+\S/;
 const TABLE_SEP_RE = /^\|?\s*:?-{3,}/;
-const HOOKS_DIR_RE = /[\\/]\.claude[\\/]hooks$/;
+const HOOKS_DIR_RE = /[\\/](?:\.claude[\\/]hooks|\.codex[\\/]workflow)$/;
 const SNIPPET = 60;
 
 function stripBom(text) {

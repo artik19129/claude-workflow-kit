@@ -11,8 +11,8 @@ const DONE_LIMIT = 20;
 const KNOWN_STATUSES = new Set([].concat(IN_WORK, WAITING, BACKLOG, DONE));
 const TASK_FILE_RE = /^VC-.+\.md$/i;
 const TASK_ID_FILE_RE = /^VC-(\d+)\.md$/i;
-const HOOKS_DIR_RE = /[\\/]\.claude[\\/]hooks$/;
-const GENERATED_NOTE = '<!-- файл генерируется: node .claude/hooks/board.js — руками не править -->';
+const HOOKS_DIR_RE = /[\\/](?:\.claude[\\/]hooks|\.codex[\\/]workflow)$/;
+const GENERATED_NOTE = '<!-- файл генерируется: node ' + (/\.codex[\\/]workflow$/.test(__dirname) ? '.codex/workflow/' : '.claude/hooks/') + 'board.js — руками не править -->';
 
 function tasksDir(root) {
   return path.join(root, 'tasks');
