@@ -274,6 +274,7 @@ function projectOwnedFiles() {
     { src: path.join(templates, 'tasks', '_template.md'), dest: path.join('tasks', '_template.md') },
     { src: path.join(templates, 'docs', 'decisions.md'), dest: path.join('docs', 'decisions.md') },
     { src: path.join(templates, 'docs', 'specs', '_template.md'), dest: path.join('docs', 'specs', '_template.md') },
+    { src: path.join(templates, 'docs', 'memory', 'project.md'), dest: path.join('docs', 'memory', 'project.md') },
   ];
 }
 
@@ -510,31 +511,12 @@ function mergeHooks(project, opts) {
     }
     let groups = Array.isArray(hooks[event]) ? hooks[event] : [];
 
-    const wanted = new Map();
-    for (const group of fragment[event]) {
-      for (const hook of group.hooks || []) wanted.set(hookKey(hook), hook);
-    }
-    const satisfied = new Set();
-
-    groups = groups
-      .map((group) => {
-        if (!group || !Array.isArray(group.hooks)) return group;
-        const kept = group.hooks.filter((h) => {
-          const key = hookKey(h);
-          if (key === null || !wanted.has(key)) return true;
-          if (satisfied.has(key) || !sameHook(h, wanted.get(key))) return false;
-          satisfied.add(key);
-          return true;
-        });
-        return kept.length === group.hooks.length ? group : Object.assign({}, group, { hooks: kept });
-      })
-      .filter((group) => !group || !Array.isArray(group.hooks) || group.hooks.length > 0);
-
-    for (const group of fragment[event]) {
-      const missing = (group.hooks || []).filter((h) => !satisfied.has(hookKey(h)));
-      if (missing.length === 0) continue;
-      groups.push(Object.assign({}, group, { hooks: missing }));
-    }
+    groups = groups.flatMap(group => {
+      if (!group || !Array.isArray(group.hooks)) return [group];
+      const kept = group.hooks.filter(h => hookKey(h) === null);
+      return kept.length ? [Object.assign({}, group, { hooks: kept })] : [];
+    });
+    groups.push(...fragment[event]);
     hooks[event] = groups;
   }
   settings.hooks = hooks;
@@ -789,7 +771,7 @@ function generateBoard(project, dryRun) {
 
 function preflight(project, opts, checkNode) {
   gitignoreBlockLines();
-  const fragment = loadHooksFragment(null);
+  const fragment = loadHooksFragment(opts.node);
 
   const claudeText = readText(path.join(project, 'CLAUDE.md'));
   if (claudeText !== null) countClaudeBlocks(claudeText);
@@ -920,26 +902,20 @@ function commandStatus(project, opts) {
   rows.push({ state: sectionState, target: 'CLAUDE.md (секция кита)' });
 
   const settings = readSettings(path.join(project, '.claude', 'settings.json'));
-  const fragment = loadHooksFragment(null);
+  const fragment = loadHooksFragment(opts.node);
   let total = 0;
   let present = 0;
   let legacy = 0;
   for (const event of Object.keys(fragment)) {
     const groups =
       settings.data.hooks && Array.isArray(settings.data.hooks[event]) ? settings.data.hooks[event] : [];
-    const keys = new Set();
-    for (const group of groups) {
-      for (const hook of group && Array.isArray(group.hooks) ? group.hooks : []) {
-        const key = hookKey(hook);
-        if (key === null) continue;
-        keys.add(key);
-        if (isLegacyHook(hook)) legacy++;
-      }
-    }
+    const entries = groups.flatMap(group => (group && Array.isArray(group.hooks) ? group.hooks : []).map(hook => ({ group, hook })));
+    for (const entry of entries) if (hookKey(entry.hook) !== null && isLegacyHook(entry.hook)) legacy++;
     for (const group of fragment[event]) {
       for (const hook of group.hooks || []) {
         total++;
-        if (keys.has(hookKey(hook))) present++;
+        const matches = entries.filter(e => hookKey(e.hook) === hookKey(hook));
+        if (matches.length === 1 && !matches[0].group.matcher && !matches[0].group.if && sameHook(matches[0].hook, hook)) present++;
       }
     }
   }

@@ -447,39 +447,18 @@ safe('T13', function () {
   check('T13 check задачи без поля spec exit 1', c6.status === 1 && /нет поля spec/.test(c6.err), 'exit ' + c6.status + ' ' + c6.err.trim());
 });
 
-// T14 — гейт спеки в стоп-хуке: селфтест хука и сценарий по установленному проекту
+// T14 — проверка до вызова инструмента, без чтения транскрипта.
 safe('T14', function () {
-  const st = spawnNode([GUARD, 'selftest']);
-  check('T14 селфтест хука exit 0', st.status === 0, 'exit ' + st.status + '\n' + st.out);
-  check('T14 селфтест содержит кейсы гейта спеки', /PASS caseD1/.test(st.out) && /PASS caseD9/.test(st.out) && !/FAIL/.test(st.out), (st.out.match(/.*case[D]\d.*/g) || []).join(' / '));
-
   const d = mk('spec-t14');
   run(['install', d]);
-  write(d, 'tasks/VC-001.md', '---\nid: VC-001\ntitle: Экспорт CSV\nsize: M\nstatus: approved\nspec: docs/specs/VC-001-export-csv.md\n---\n');
-  write(d, 'docs/specs/VC-001-export-csv.md', FILLED_SPEC.replace('status: draft', 'status: approved'));
+  write(d, 'tasks/VC-001.md', '---\nid: VC-001\nsize: M\nstatus: in_progress\nspec: docs/specs/VC-001-export-csv.md\n---\n');
+  write(d, 'docs/specs/VC-001-export-csv.md', FILLED_SPEC);
   const guard = require(GUARD);
-  const transcript = path.join(d, 'transcript.jsonl');
-  const entries = (prompt) => [
-    { type: 'user', message: { role: 'user', content: 'сделай VC-001' } },
-    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Заспавнил: impl-opus · opus · high — VC-001' }] } },
-    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Agent', input: { subagent_type: 'impl-opus', description: 'VC-001', prompt: prompt, run_in_background: true } }] } },
-  ];
-  const savedEnv = process.env.CLAUDE_PROJECT_DIR;
-  delete process.env.CLAUDE_PROJECT_DIR;
-  try {
-    fs.writeFileSync(transcript, entries('Задача VC-001. Спека: docs/specs/VC-001-export-csv.md, зона «сервер».').map((e) => JSON.stringify(e)).join('\n') + '\n');
-    const ok = guard.runStop({ transcript_path: transcript, stop_hook_active: false, cwd: d });
-    check('T14 путь к утверждённой спеке в брифе — не блокирует', ok.block === false, ok.reason);
-    fs.writeFileSync(transcript, entries('Задача VC-001, сделай по спеке.').map((e) => JSON.stringify(e)).join('\n') + '\n');
-    const blocked = guard.runStop({ transcript_path: transcript, stop_hook_active: false, cwd: d });
-    check('T14 бриф без пути к спеке — блокирует с причиной D', blocked.block === true && /не указан в брифе/.test(blocked.reason), blocked.reason);
-    process.env.CLAUDE_PROJECT_DIR = d;
-    const viaEnv = guard.runStop({ transcript_path: transcript, stop_hook_active: false, cwd: path.join(d, 'src') });
-    check('T14 корень берётся из CLAUDE_PROJECT_DIR', viaEnv.block === true, viaEnv.reason);
-  } finally {
-    if (savedEnv === undefined) delete process.env.CLAUDE_PROJECT_DIR;
-    else process.env.CLAUDE_PROJECT_DIR = savedEnv;
-  }
+  const input = { hook_event_name: 'PreToolUse', cwd: d, tool_name: 'Agent', tool_input: { subagent_type: 'impl-opus', prompt: 'Workflow-Task: VC-001\ndocs/specs/VC-001-export-csv.md', run_in_background: true } };
+  check('T14 draft denied before spawn', guard.handle(d, input).hookSpecificOutput?.permissionDecision === 'deny');
+  write(d, 'docs/specs/VC-001-export-csv.md', FILLED_SPEC.replace('status: draft', 'status: approved').replace(/^approved:.*$/m, 'approved: 2026-10-15 test'));
+  check('T14 approved foreground allowed', !guard.handle(d, { ...input, tool_input: { ...input.tool_input, run_in_background: false } }).hookSpecificOutput);
+  check('T14 no transcript quota', !guard.handle(d, { hook_event_name: 'Stop', cwd: d }).decision);
 });
 
 // T15 — frontmatter: пустое значение с комментарием
@@ -643,8 +622,10 @@ safe('T21 Codex agent profiles', function () {
   check('T21 install', run(['install', d, '--target', 'codex', '--no-design-skill']).status === 0);
   const roles = fs.readdirSync(path.join(KIT, 'kit/agents')).map(f => f.replace('.md', ''));
   for (const role of roles) {
+    const description = /^description: (.+)$/m.exec(fs.readFileSync(path.join(KIT, 'kit/agents', role + '.md'), 'utf8'));
+    check('T21 Claude description is YAML-safe ' + role, !!description && typeof JSON.parse(description[1]) === 'string');
     const text = read(d, '.codex/agents/' + role + '.toml');
-    check('T21 model and effort ' + role, text.includes('model = "gpt-6-sol"') && text.includes('model_reasoning_effort = "' + (role === 'explore-opus' ? 'medium' : 'high') + '"') && text.includes('name = "' + role + '"') && text.includes('developer_instructions = '));
+    check('T21 model and effort ' + role, text.includes('model = "gpt-6.1-sol"') && text.includes('model_reasoning_effort = "' + (role === 'explore-opus' ? 'medium' : 'high') + '"') && text.includes('name = "' + role + '"') && text.includes('developer_instructions = '));
   }
   write(d, '.codex/agents/custom.toml', 'user profile');
   write(d, '.codex/agents/explore-opus.toml', 'drift');
@@ -655,6 +636,136 @@ safe('T21 Codex agent profiles', function () {
   const conflict = mk('codex-role-conflict');
   write(conflict, '.codex/agents/impl-opus.toml', 'user profile');
   check('T21 conflict before either target changes', run(['install', conflict, '--target', 'both']).status === 1 && read(conflict, 'CLAUDE.md') === null && read(conflict, '.codex/agents/impl-opus.toml') === 'user profile');
+});
+
+safe('T22 shared policy hook processes', function () {
+  const d = mk('shared policy spaces');
+  run(['install', d, '--target', 'both', '--no-design-skill']);
+  const approved = FILLED_SPEC.replace('status: draft', 'status: approved').replace(/^approved:.*$/m, 'approved: 2026-10-15 fixture');
+  const task = (id, size, status, ref) => write(d, 'tasks/' + id + '.md', '---\nid: ' + id + '\nsize: ' + size + '\nstatus: ' + status + '\nspec: ' + ref + '\n---\n');
+  task('VC-001', 'M', 'discuss', 'docs/specs/VC-001-export-csv.md');
+  task('VC-002', 'S', 'in_progress', '');
+  write(d, 'docs/specs/VC-001-export-csv.md', FILLED_SPEC);
+  check('T22 identical policy in both clients', read(d, '.codex/workflow/workflow-policy.js') === read(d, '.claude/hooks/workflow-policy.js'));
+  const cases = [
+    ['Write code', 'Write', { file_path: 'src/a.js', content: 'x' }, true],
+    ['Write plan', 'Write', { file_path: path.join(d, 'docs/specs/VC-001-export-csv.md'), content: 'x' }, false],
+    ['Edit memory', 'Edit', { file_path: 'docs/memory/project.md' }, false],
+    ['MultiEdit code', 'MultiEdit', { file_path: 'src/a.js' }, true],
+    ['notebook', 'NotebookEdit', { notebook_path: 'a.ipynb' }, true],
+    ['PowerShell write', 'PowerShell', { command: 'Set-Content src/a.js x' }, true],
+    ['exec cmd write', 'exec_command', { cmd: 'Set-Content src/a.js x' }, true],
+    ['exec cmd read', 'exec_command', { cmd: 'Get-Content README.md' }, false],
+    ['stdin write', 'write_stdin', { chars: 'Set-Content src/a.js x\n' }, true],
+    ['stdin poll', 'write_stdin', { chars: '' }, false],
+    ['Claude critic', 'Agent', { subagent_type: 'arch-critic', prompt: 'Workflow-Task: VC-001' }, false],
+    ['Claude worker', 'Task', { subagent_type: 'impl-opus', prompt: 'Workflow-Task: VC-001\ndocs/specs/VC-001-export-csv.md' }, true],
+    ['Codex critic', 'spawn_agent', { agent_type: 'product-critic', message: 'Workflow-Task: VC-001' }, false],
+    ['generic role', 'Agent', { subagent_type: 'general-purpose', prompt: 'I am read-only' }, true],
+    ['S ignores referenced M', 'Agent', { subagent_type: 'impl-sonnet', prompt: 'Workflow-Task: VC-002\nDo not touch VC-001' }, false],
+    ['unknown task', 'spawn_agent', { agent_type: 'impl-opus', message: 'Workflow-Task: VC-999' }, true],
+    ['followup', 'followup_task', { message: 'Workflow-Task: VC-001\nImplement' }, true],
+    ['Claude followup', 'SendMessage', { content: 'Workflow-Task: VC-001\nImplement' }, true],
+    ['rg pre', 'Bash', { command: 'rg --pre=evil foo' }, true],
+    ['git external diff', 'Bash', { command: 'git diff --ext-diff' }, true],
+  ];
+  const invoke = (client, event, input) => {
+    const cfg = json(d, client === 'claude' ? '.claude/settings.json' : '.codex/hooks.json');
+    const h = cfg.hooks[event].flatMap(g => g.hooks).find(h => client === 'codex' || h.args[0].includes('orchestrator-guard.js'));
+    const payload = JSON.stringify({ cwd: d, session_id: 'policy-' + client + path.basename(d), hook_event_name: event, ...input });
+    const r = client === 'claude' ? cp.spawnSync(process.execPath, h.args.map(a => a.replace('${CLAUDE_PROJECT_DIR}', d)), { input: payload, encoding: 'utf8', cwd: d }) : cp.spawnSync(h.command, { shell: true, input: payload, encoding: 'utf8', cwd: d });
+    if (r.status !== 0) throw new Error(client + ' hook exit ' + r.status + ' ' + r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  for (const client of ['claude', 'codex']) {
+    invoke(client, 'UserPromptSubmit', { prompt: 'Workflow-Task: VC-001\nReference VC-002' });
+    for (const [label, tool, args, denied] of cases) {
+      const result = invoke(client, 'PreToolUse', { tool_name: tool, tool_input: args });
+      check('T22 ' + client + ' ' + label, (result.hookSpecificOutput?.permissionDecision === 'deny') === denied);
+    }
+    check('T22 ' + client + ' nested helper denied', invoke(client, 'PreToolUse', { cwd: path.join(d, 'nested'), tool_name: 'Bash', tool_input: { command: 'node .claude/hooks/board.js' } }).hookSpecificOutput?.permissionDecision === 'deny');
+  }
+  write(d, 'docs/specs/VC-001-export-csv.md', approved);
+  for (const client of ['claude', 'codex']) {
+    check('T22 ' + client + ' approved Write', !invoke(client, 'PreToolUse', { tool_name: 'Write', tool_input: { file_path: 'src/a.js', content: 'x' } }).hookSpecificOutput);
+    for (const [prompt, denied] of [
+      ['Workflow-Task: VC-001\ndocs/specs/VC-001-export-csv.md', false],
+      ['Workflow-Task: VC-001', true],
+      ['VC-001 docs/specs/VC-001-export-csv.md', true],
+    ]) check('T22 ' + client + ' approved brief ' + prompt, (invoke(client, 'PreToolUse', { tool_name: 'Agent', tool_input: { subagent_type: 'impl-opus', prompt } }).hookSpecificOutput?.permissionDecision === 'deny') === denied);
+  }
+  task('VC-003', 'M', 'discuss', 'docs/specs/VC-003-other.md');
+  write(d, 'docs/specs/VC-003-other.md', FILLED_SPEC.replaceAll('VC-001', 'VC-003'));
+  for (const client of ['claude', 'codex']) check('T22 ' + client + ' mixed approvals denied', invoke(client, 'PreToolUse', { tool_name: 'Agent', tool_input: { subagent_type: 'impl-opus', prompt: 'Workflow-Task: VC-001, VC-003\ndocs/specs/VC-001-export-csv.md docs/specs/VC-003-other.md' } }).hookSpecificOutput?.permissionDecision === 'deny');
+  const policy = require(path.join(d, '.claude/hooks/workflow-policy.js'));
+  for (const [label, text] of [['missing approval', approved.replace('approved: 2026-10-15 fixture', 'approved:')], ['wrong ID', approved.replace('id: VC-001', 'id: VC-003')]]) {
+    write(d, 'docs/specs/VC-001-export-csv.md', text);
+    check('T22 ' + label, !!policy.specIssue(d, { id: 'VC-001', data: { size: 'M', spec: 'docs/specs/VC-001-export-csv.md' } }));
+  }
+  for (const client of ['claude', 'codex']) {
+    invoke(client, 'UserPromptSubmit', { prompt: 'Workflow-Task: VC-002' });
+    task('VC-002', 'S', 'done', '');
+    check('T22 ' + client + ' done evidence missing', invoke(client, 'Stop', {}).decision === 'block');
+    check('T22 ' + client + ' bounded Stop', !invoke(client, 'Stop', { stop_hook_active: true }).decision);
+    write(d, 'tasks/VC-002.md', read(d, 'tasks/VC-002.md') + '\n## Критерии приёмки\n- [x] результат\n## Приёмка\nnode --test: exit 0, 1 PASS\n');
+    check('T22 ' + client + ' done evidence present', !invoke(client, 'Stop', {}).decision);
+  }
+});
+
+safe('T23 memory and hook integrity', function () {
+  const d = mk('memory-integrity');
+  run(['install', d, '--target', 'both', '--no-design-skill']);
+  check('T23 same base memory', read(d, '.claude/skills/workflow-memory/references/data.md') === read(d, '.agents/skills/workflow-memory/references/data.md'));
+  write(d, 'docs/memory/project.md', 'project-owned memory');
+  write(d, 'docs/memory/custom.md', 'project-owned lesson');
+  const st = json(d, '.claude/settings.json');
+  st.hooks.PreToolUse[0].matcher = 'Bash';
+  st.hooks.Stop[0].hooks[0].async = true;
+  write(d, '.claude/settings.json', JSON.stringify(st));
+  check('T23 Claude narrowed/async hook detected', run(['status', d, '--target', 'claude']).status === 1);
+  const codex = json(d, '.codex/hooks.json');
+  codex.hooks.PreToolUse[0].hooks[0].if = 'Bash(echo *)';
+  write(d, '.codex/hooks.json', JSON.stringify(codex));
+  check('T23 Codex conditional hook detected', run(['status', d, '--target', 'codex']).status === 1);
+  check('T23 update restores hooks', run(['update', d, '--target', 'both']).status === 0 && run(['status', d, '--target', 'both']).status === 0);
+  const repaired = json(d, '.claude/settings.json');
+  check('T23 matcher removed', !repaired.hooks.PreToolUse[0].matcher && !repaired.hooks.Stop[0].hooks[0].async);
+  check('T23 project memory preserved on update', read(d, 'docs/memory/project.md') === 'project-owned memory');
+  run(['uninstall', d, '--target', 'claude']);
+  check('T23 Codex memory survives', read(d, '.agents/skills/workflow-memory/SKILL.md') !== null);
+  run(['uninstall', d, '--target', 'codex']);
+  check('T23 project memory preserved on uninstall', read(d, '.agents/skills/workflow-memory/SKILL.md') === null && read(d, 'docs/memory/project.md') === 'project-owned memory' && read(d, 'docs/memory/custom.md') === 'project-owned lesson');
+});
+
+safe('T24 state and path regressions', function () {
+  const d = mk('state-regressions');
+  run(['install', d, '--target', 'both', '--no-design-skill']);
+  const policy = require(path.join(d, '.codex/workflow/workflow-policy.js'));
+  const base = { cwd: d, session_id: 'new-task-' + path.basename(d), hook_event_name: 'PreToolUse' };
+  policy.handle(d, { ...base, tool_name: 'Write', tool_input: { file_path: 'tasks/VC-004.md', content: 'x' } });
+  write(d, 'tasks/VC-004.md', '---\nid: VC-004\nsize: S\nstatus: done\n---\n');
+  check('T24 new done task retained for Stop', policy.handle(d, { ...base, hook_event_name: 'Stop' }).decision === 'block');
+  const multi = { ...base, session_id: 'multi-' + path.basename(d) };
+  for (const id of ['VC-005', 'VC-006']) write(d, 'tasks/' + id + '.md', '---\nid: ' + id + '\nsize: S\nstatus: in_progress\n---\n');
+  policy.handle(d, { ...multi, tool_name: 'Read', tool_input: { file_path: 'README.md' } });
+  for (const id of ['VC-005', 'VC-006']) write(d, 'tasks/' + id + '.md', read(d, 'tasks/' + id + '.md').replace('in_progress', 'done'));
+  const stopped = policy.handle(d, { ...multi, hook_event_name: 'Stop' });
+  check('T24 all implicitly selected done tasks retained', stopped.decision === 'block' && stopped.reason.includes('VC-005') && stopped.reason.includes('VC-006'));
+  check('T24 session isolation', !policy.handle(d, { hook_event_name: 'Stop', cwd: d, session_id: 'unrelated' }).decision);
+  check('T24 multiple tasks in header', policy.explicitIds('Workflow-Task: VC-005, VC-006\nReference VC-004').join(',') === 'VC-005,VC-006');
+  check('T24 command overrides reference', policy.explicitIds('$task VC-005, leave VC-004 alone').join(',') === 'VC-005');
+  check('T24 traversal planning denied', !policy.planningFile(d, d, 'docs/memory/../../../outside.md'));
+  fs.mkdirSync(path.join(d, 'real-memory'));
+  const linked = path.join(d, 'linked-project');
+  fs.mkdirSync(path.join(linked, 'docs'), { recursive: true });
+  fs.symlinkSync(path.join(d, 'real-memory'), path.join(linked, 'docs/memory'), process.platform === 'win32' ? 'junction' : 'dir');
+  check('T24 planning directory link denied', !policy.planningFile(linked, linked, 'docs/memory/entry.md'));
+  for (const entry of ['.claude/hooks/orchestrator-guard.js', '.codex/workflow/guard.js']) {
+    const result = cp.spawnSync(process.execPath, [path.join(d, entry), 'pre'], { cwd: d, input: '{broken', encoding: 'utf8' });
+    check('T24 malformed hook input ' + entry, result.status === 2 && result.stderr.includes('[workflow-kit]'));
+  }
+  const entries = [read(d, 'CLAUDE.md'), read(d, 'AGENTS.md')];
+  check('T24 routing references memory in both clients', entries.every(text => text.includes('docs/memory/project.md') && text.includes('Workflow-Task')));
 });
 
 let failed = 0;
